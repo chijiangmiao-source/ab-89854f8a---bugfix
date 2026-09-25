@@ -10,7 +10,7 @@ export interface SpeciesParse {
 export interface Candidate {
   id: number; // 有效候选序号（1 起）
   line: number; // 原始输入行号（1 起）
-  weight: number;
+  weight: bigint; // 任意精度权重：由十进制原文无损解析
   weightText: string;
   mask: number; // 规范掩码：不含首个物种的一侧
   flipped: boolean; // 录入侧是否含首个物种（即规范化时是否取了补）
@@ -33,7 +33,7 @@ export interface SplitParse {
 }
 
 export interface Score {
-  weight: number;
+  weight: bigint; // 任意精度总权重，展示时按十进制无损输出
   count: number;
 }
 
@@ -47,27 +47,6 @@ export interface Analysis {
 }
 
 const NAME_RE = /^[\x21-\x7E]+$/; // 可打印 ASCII、不含空白
-
-function searchWeight(text: string): number {
-  const modulus = 1_000_000_007;
-  let residue = 0;
-  let chunk = 0;
-  let digits = 0;
-  for (const char of text) {
-    chunk = chunk * 10 + (char.charCodeAt(0) - 48);
-    digits++;
-    if (digits === 3) {
-      residue = (residue * 1000 + chunk) % modulus;
-      chunk = 0;
-      digits = 0;
-    }
-  }
-  if (digits > 0) {
-    const scale = 10 ** digits;
-    residue = (residue * scale + chunk) % modulus;
-  }
-  return residue;
-}
 
 export function fullMask(n: number): number {
   return (1 << n) - 1;
@@ -146,11 +125,12 @@ export function parseSplits(text: string, names: string[]): SplitParse {
       fail(`权重须为正整数，收到「${weightStr}」`);
       return;
     }
-    if (BigInt(weightStr) < 1n) {
+    // 任意位数的正整数权重：BigInt 无损解析，weightText 保留原始十进制文本
+    const weight = BigInt(weightStr);
+    if (weight < 1n) {
       fail('权重须为正整数（≥1）');
       return;
     }
-    const weight = searchWeight(weightStr);
 
     // 两侧
     const parts = rest.split('|');
@@ -258,13 +238,14 @@ function sameScore(a: Score, b: Score): boolean {
 
 /**
  * 精确求解带约束的最大兼容集：先最大化总权重，再最大化数量。
+ * 权重为任意精度整数（bigint），汇总与比较全程无损。
  * forcedIn 中的候选必选，forcedOut 中的候选禁用；约束不可行时返回 null。
  * 分支定界：候选 ≤28，用位掩码表示剩余候选集；上界 = 当前权重 + 剩余权重和。
  * 相容的非平凡分裂集合大小 ≤ n-3（二歧树内部分裂数），用于数量剪枝。
  */
 export function solveMaxCompatible(
   masks: number[],
-  weights: number[],
+  weights: bigint[],
   n: number,
   forcedIn: number[] = [],
   forcedOut: ReadonlySet<number> = new Set<number>(),
@@ -278,7 +259,7 @@ export function solveMaxCompatible(
     }
   }
 
-  let baseW = 0;
+  let baseW = 0n;
   let baseC = 0;
   for (const i of forcedIn) {
     baseW += weights[i];
@@ -298,7 +279,8 @@ export function solveMaxCompatible(
     }
     if (ok) free.push(i);
   }
-  free.sort((a, b) => weights[b] - weights[a]); // 权重降序，尽早找到好解
+  // 权重降序，尽早找到好解（bigint 比较）
+  free.sort((a, b) => (weights[b] > weights[a] ? 1 : weights[b] < weights[a] ? -1 : 0));
 
   const k = free.length;
   const w = free.map((i) => weights[i]);
@@ -314,8 +296,8 @@ export function solveMaxCompatible(
 
   let best: Score = { weight: baseW, count: baseC };
 
-  function rec(cands: number, cw: number, cc: number): void {
-    let sumW = 0;
+  function rec(cands: number, cw: bigint, cc: number): void {
+    let sumW = 0n;
     let cnt = 0;
     for (let mm = cands; mm !== 0; ) {
       const b = mm & -mm;
@@ -348,7 +330,7 @@ export function solveMaxCompatible(
  */
 export function analyze(
   masks: number[],
-  weights: number[],
+  weights: bigint[],
   labels: string[],
   n: number,
 ): Analysis {

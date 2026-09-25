@@ -106,7 +106,7 @@ export default function App() {
           <div className="panel summary">
             <div className="stat">
               <span>最大总权重</span>
-              <b>{analysis.score.weight}</b>
+              <b>{analysis.score.weight.toString()}</b>
             </div>
             <div className="stat">
               <span>分裂数量</span>
