@@ -1,5 +1,7 @@
 // 核心领域逻辑：物种与候选分裂解析、互补规范化、四交集兼容性判定、
 // 精确最大兼容集求解（先总权重、再数量、最后规范序列字典序），以及候选三分类。
+// 权重为任意位数的正整数，以 BigInt 精确存储与汇总（不取模、不截断）；
+// 候选表另保留原始十进制文本用于无损展示。
 // 纯函数实现，不依赖 DOM / 网络，可在浏览器与 Node（verify 验收）中复用。
 
 export interface SpeciesParse {
@@ -10,8 +12,8 @@ export interface SpeciesParse {
 export interface Candidate {
   id: number; // 有效候选序号（1 起）
   line: number; // 原始输入行号（1 起）
-  weight: number;
-  weightText: string;
+  weight: bigint; // 任意精度正整数权重（精确值）
+  weightText: string; // 原始十进制文本（候选表无损展示用）
   mask: number; // 规范掩码：不含首个物种的一侧
   flipped: boolean; // 录入侧是否含首个物种（即规范化时是否取了补）
   side: string[]; // 规范侧物种名（字典序）
@@ -33,7 +35,7 @@ export interface SplitParse {
 }
 
 export interface Score {
-  weight: number;
+  weight: bigint; // 总权重（任意精度，展示时按十进制无损输出）
   count: number;
 }
 
@@ -47,27 +49,6 @@ export interface Analysis {
 }
 
 const NAME_RE = /^[\x21-\x7E]+$/; // 可打印 ASCII、不含空白
-
-function searchWeight(text: string): number {
-  const modulus = 1_000_000_007;
-  let residue = 0;
-  let chunk = 0;
-  let digits = 0;
-  for (const char of text) {
-    chunk = chunk * 10 + (char.charCodeAt(0) - 48);
-    digits++;
-    if (digits === 3) {
-      residue = (residue * 1000 + chunk) % modulus;
-      chunk = 0;
-      digits = 0;
-    }
-  }
-  if (digits > 0) {
-    const scale = 10 ** digits;
-    residue = (residue * scale + chunk) % modulus;
-  }
-  return residue;
-}
 
 export function fullMask(n: number): number {
   return (1 << n) - 1;
@@ -109,6 +90,7 @@ export function parseSpecies(text: string): SpeciesParse {
 
 /**
  * 解析候选分裂。每行格式：`权重: 侧A | 侧B`（冒号可省，侧B 可省，省略时取补集）。
+ * 权重为任意位数正整数，以 BigInt 精确存储，同时保留原始十进制文本。
  * 非平凡：两侧均 ≥2；互补分裂视为同一项并拒绝重复。
  */
 export function parseSplits(text: string, names: string[]): SplitParse {
@@ -146,11 +128,11 @@ export function parseSplits(text: string, names: string[]): SplitParse {
       fail(`权重须为正整数，收到「${weightStr}」`);
       return;
     }
-    if (BigInt(weightStr) < 1n) {
+    const weight = BigInt(weightStr); // 任意位数正整数，精确解析
+    if (weight < 1n) {
       fail('权重须为正整数（≥1）');
       return;
     }
-    const weight = searchWeight(weightStr);
 
     // 两侧
     const parts = rest.split('|');
@@ -261,10 +243,11 @@ function sameScore(a: Score, b: Score): boolean {
  * forcedIn 中的候选必选，forcedOut 中的候选禁用；约束不可行时返回 null。
  * 分支定界：候选 ≤28，用位掩码表示剩余候选集；上界 = 当前权重 + 剩余权重和。
  * 相容的非平凡分裂集合大小 ≤ n-3（二歧树内部分裂数），用于数量剪枝。
+ * 权重以 BigInt 精确累加，任意位数正整数均不丢精度。
  */
 export function solveMaxCompatible(
   masks: number[],
-  weights: number[],
+  weights: bigint[],
   n: number,
   forcedIn: number[] = [],
   forcedOut: ReadonlySet<number> = new Set<number>(),
@@ -278,7 +261,7 @@ export function solveMaxCompatible(
     }
   }
 
-  let baseW = 0;
+  let baseW = 0n;
   let baseC = 0;
   for (const i of forcedIn) {
     baseW += weights[i];
@@ -298,7 +281,7 @@ export function solveMaxCompatible(
     }
     if (ok) free.push(i);
   }
-  free.sort((a, b) => weights[b] - weights[a]); // 权重降序，尽早找到好解
+  free.sort((a, b) => (weights[b] > weights[a] ? 1 : weights[b] < weights[a] ? -1 : 0)); // 权重降序，尽早找到好解
 
   const k = free.length;
   const w = free.map((i) => weights[i]);
@@ -314,8 +297,8 @@ export function solveMaxCompatible(
 
   let best: Score = { weight: baseW, count: baseC };
 
-  function rec(cands: number, cw: number, cc: number): void {
-    let sumW = 0;
+  function rec(cands: number, cw: bigint, cc: number): void {
+    let sumW = 0n;
     let cnt = 0;
     for (let mm = cands; mm !== 0; ) {
       const b = mm & -mm;
@@ -348,7 +331,7 @@ export function solveMaxCompatible(
  */
 export function analyze(
   masks: number[],
-  weights: number[],
+  weights: bigint[],
   labels: string[],
   n: number,
 ): Analysis {

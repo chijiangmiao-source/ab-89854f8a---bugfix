@@ -58,7 +58,7 @@ describe('parseSplits', () => {
     expect(r.lineErrors).toEqual([]);
     expect(r.candidates).toHaveLength(1);
     const c = r.candidates[0];
-    expect(c.weight).toBe(3);
+    expect(c.weight).toBe(3n);
     expect(c.flipped).toBe(true); // 录入侧含首个物种 A，已取补
     expect(c.label).toBe('C D E');
     expect(c.display).toBe('C D E | A B');
@@ -109,7 +109,7 @@ describe('parseSplits', () => {
     const r = parseSplits('\n3 A B\n\n', names);
     expect(r.lineErrors).toEqual([]);
     expect(r.candidates).toHaveLength(1);
-    expect(r.candidates[0].weight).toBe(3);
+    expect(r.candidates[0].weight).toBe(3n);
   });
 
   it('有效候选数量约束为 1–28', () => {
@@ -152,7 +152,7 @@ describe('solveMaxCompatible / analyze', () => {
   it('高权陷阱：精确解胜过逐条贪心', () => {
     // x=AB(9) 与 y=AC(5)、z=BE(5) 均冲突；y、z、w=DF(2) 两两兼容
     const { an } = analyzeOk(SPECIES6, ['9: A B', '5: A C', '5: B E', '2: D F'].join('\n'));
-    expect(an.score).toEqual({ weight: 12, count: 3 }); // 贪心先拿 9 只得 11
+    expect(an.score).toEqual({ weight: 12n, count: 3 }); // 贪心先拿 9 只得 11
     expect(an.chosen).toEqual([1, 2, 3]);
     expect(an.verdicts).toEqual(['never', 'required', 'required', 'required']);
   });
@@ -160,7 +160,7 @@ describe('solveMaxCompatible / analyze', () => {
   it('三分类：必选 / 可选 / 从不选，且展示解字典序最小', () => {
     // r=AB(10) 必选；o1=CD(5)、o2=CE(5) 互换（各同优解取其一）；z=AC(12) 与 r 冲突从不选
     const { r, an } = analyzeOk(SPECIES6, ['10: A B', '5: C D', '5: C E', '12: A C'].join('\n'));
-    expect(an.score).toEqual({ weight: 15, count: 2 });
+    expect(an.score).toEqual({ weight: 15n, count: 2 });
     expect(an.verdicts).toEqual(['required', 'optional', 'optional', 'never']);
     // 两个同优解 {r,o1}、{r,o2}：规范序列 ["C D","C D E F"] < ["C D E F","C E"]
     // chosen 按规范标签字典序给出：o1("C D") 在 r("C D E F") 之前
@@ -171,7 +171,7 @@ describe('solveMaxCompatible / analyze', () => {
   it('总权重相同则分裂数量多者优', () => {
     // p=AB(4) 与 q=AC(2)、r=BE(2) 均冲突；q、r 兼容
     const { an } = analyzeOk(SPECIES6, ['4: A B', '2: A C', '2: B E'].join('\n'));
-    expect(an.score).toEqual({ weight: 4, count: 2 });
+    expect(an.score).toEqual({ weight: 4n, count: 2 });
     expect(an.chosen).toEqual([1, 2]);
     expect(an.verdicts).toEqual(['never', 'required', 'required']);
   });
@@ -195,9 +195,141 @@ describe('solveMaxCompatible / analyze', () => {
     const n = sp.names.length;
     expect(solveMaxCompatible(masks, weights, n, [0, 3])).toBeNull(); // r 与 z 冲突
     expect(solveMaxCompatible(masks, weights, n, [], new Set([0]))).toEqual({
-      weight: 12,
+      weight: 12n,
       count: 1,
     }); // 禁用 r 后只剩 z=12
+  });
+});
+
+describe('大整数权重（任意位数正整数，精确无损）', () => {
+  const BIG = '1000000007000000001'; // 超过 64 位与 2^53，且 ≡ 1 (mod 1_000_000_007)
+  const MID = '900000000';
+  const SMALL = '1';
+
+  // 物种 A B C D；三条非平凡分裂两两冲突（四交集均非空）
+  function bigScenario() {
+    const sp = parseSpecies('A B C D');
+    expect(sp.errors).toEqual([]);
+    const r = parseSplits(
+      [`${BIG}: A B | C D`, `${MID}: A C | B D`, `${SMALL}: A D | B C`].join('\n'),
+      sp.names,
+    );
+    expect(r.errors).toEqual([]);
+    expect(r.lineErrors).toEqual([]);
+    expect(r.candidates).toHaveLength(3);
+    const an = analyze(
+      r.candidates.map((c) => c.mask),
+      r.candidates.map((c) => c.weight),
+      r.candidates.map((c) => c.label),
+      sp.names.length,
+    );
+    return { r, an };
+  }
+
+  it('候选表保留首条权重的原始十进制文本，且权重精确解析', () => {
+    const { r } = bigScenario();
+    expect(r.candidates.map((c) => c.weightText)).toEqual([BIG, MID, SMALL]);
+    expect(r.candidates[0].weight).toBe(BigInt(BIG));
+    expect(r.candidates[0].weight.toString()).toBe(BIG); // 无取模、无截断
+  });
+
+  it('兼容矩阵：三条分裂两两互斥', () => {
+    const { an } = bigScenario();
+    expect(an.compat).toEqual([
+      [true, false, false],
+      [false, true, false],
+      [false, false, true],
+    ]);
+  });
+
+  it('汇总无损：必选首条分裂，最大总权重为完整大整数', () => {
+    const { r, an } = bigScenario();
+    expect(an.score.weight).toBe(BigInt(BIG));
+    expect(an.score.weight.toString()).toBe(BIG); // 汇总十进制无损展示
+    expect(an.score.count).toBe(1);
+    expect(an.chosen).toEqual([0]); // 展示解 = 首条分裂（规范形式）
+    expect(r.candidates[an.chosen[0]].display).toBe('C D | A B');
+    expect(an.verdicts).toEqual(['required', 'never', 'never']);
+  });
+
+  it('候选表 / 汇总 / 展示解 / 兼容矩阵 / 三分类可相互复算', () => {
+    const { r, an } = bigScenario();
+    const m = r.candidates.length;
+
+    // ① 由展示解候选的原始文本重算总权重，须与汇总一致
+    const recomputed = an.chosen.reduce((acc, i) => acc + BigInt(r.candidates[i].weightText), 0n);
+    expect(recomputed).toBe(an.score.weight);
+
+    // ② 仅凭兼容矩阵 + 候选表权重文本暴力枚举全部同优解
+    const optimal: number[][] = [];
+    let bestW = -1n;
+    let bestC = -1;
+    for (let s = 0; s < 1 << m; s++) {
+      const mem: number[] = [];
+      for (let i = 0; i < m; i++) if ((s & (1 << i)) !== 0) mem.push(i);
+      let ok = true;
+      for (let a = 0; a < mem.length && ok; a++) {
+        for (let b = a + 1; b < mem.length && ok; b++) {
+          if (!an.compat[mem[a]][mem[b]]) ok = false;
+        }
+      }
+      if (!ok) continue;
+      const w = mem.reduce((acc, i) => acc + BigInt(r.candidates[i].weightText), 0n);
+      if (w > bestW || (w === bestW && mem.length > bestC)) {
+        bestW = w;
+        bestC = mem.length;
+        optimal.length = 0;
+        optimal.push(mem);
+      } else if (w === bestW && mem.length === bestC) {
+        optimal.push(mem);
+      }
+    }
+
+    // ③ 复算汇总得分
+    expect(bestW).toBe(an.score.weight);
+    expect(bestC).toBe(an.score.count);
+
+    // ④ 复算展示解：同优解中规范标签序列字典序最小
+    const seqs = optimal.map((mem) => mem.map((i) => r.candidates[i].label).sort());
+    seqs.sort((a, b) => {
+      for (let i = 0; i < Math.min(a.length, b.length); i++) {
+        if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+      }
+      return a.length - b.length;
+    });
+    expect(an.chosen.map((i) => r.candidates[i].label)).toEqual(seqs[0]);
+
+    // ⑤ 复算三分类：必选＝每个同优解都含；从不选＝任何同优解都不含
+    const verdicts = r.candidates.map((_, i) => {
+      const inAll = optimal.every((mem) => mem.includes(i));
+      const inSome = optimal.some((mem) => mem.includes(i));
+      if (inAll) return 'required';
+      if (!inSome) return 'never';
+      return 'optional';
+    });
+    expect(verdicts).toEqual(an.verdicts);
+  });
+
+  it('大权重与普通小权重混合时数量裁决仍生效', () => {
+    // 两条兼容小权重之和超过单条大权重以外的组合：先比总权重，再比数量
+    const sp = parseSpecies('A B C D E F');
+    const r = parseSplits(
+      [`${BIG}: A B`, `${BIG}: C D`, '3: A C', '3: B E', '3: D F'].join('\n'),
+      sp.names,
+    );
+    expect(r.lineErrors).toEqual([]);
+    const an = analyze(
+      r.candidates.map((c) => c.mask),
+      r.candidates.map((c) => c.weight),
+      r.candidates.map((c) => c.label),
+      sp.names.length,
+    );
+    // 两条大权重兼容（AB 与 CD 互补侧相容），总权重 2×BIG 胜过三条小权重 9
+    expect(an.score.weight).toBe(2n * BigInt(BIG));
+    expect(an.score.weight.toString()).toBe('2000000014000000002');
+    expect(an.score.count).toBe(2);
+    expect(an.verdicts.slice(0, 2)).toEqual(['required', 'required']);
+    expect(an.verdicts.slice(2)).toEqual(['never', 'never', 'never']);
   });
 });
 
@@ -220,15 +352,20 @@ describe('与暴力枚举对照（随机实例）', () => {
   }
 
   interface BruteResult {
-    weight: number;
+    weight: bigint;
     count: number;
     chosenLabels: string[];
     verdicts: string[];
   }
 
-  function bruteForce(masks: number[], weights: number[], labels: string[], n: number): BruteResult {
+  function bruteForce(
+    masks: number[],
+    weights: bigint[],
+    labels: string[],
+    n: number,
+  ): BruteResult {
     const m = masks.length;
-    let bestW = -1;
+    let bestW = -1n;
     let bestC = -1;
     const optimal: number[][] = [];
     for (let s = 0; s < 1 << m; s++) {
@@ -241,7 +378,7 @@ describe('与暴力枚举对照（随机实例）', () => {
         }
       }
       if (!ok) continue;
-      const w = members.reduce((acc, i) => acc + weights[i], 0);
+      const w = members.reduce((acc, i) => acc + weights[i], 0n);
       const c = members.length;
       if (w > bestW || (w === bestW && c > bestC)) {
         bestW = w;
@@ -274,7 +411,7 @@ describe('与暴力枚举对照（随机实例）', () => {
     return { weight: bestW, count: bestC, chosenLabels: chosenLabels ?? [], verdicts };
   }
 
-  it('200 个随机实例：得分、字典序展示解、三分类均与暴力一致', () => {
+  it('200 个随机实例（含大整数权重）：得分、字典序展示解、三分类均与暴力一致', () => {
     const rand = lcg(20260922);
     for (let t = 0; t < 200; t++) {
       const n = 5 + Math.floor(rand() * 4); // 5–8 个物种
@@ -282,7 +419,7 @@ describe('与暴力枚举对照（随机实例）', () => {
       const full = (1 << n) - 1;
       const seen = new Set<number>();
       const masks: number[] = [];
-      const weights: number[] = [];
+      const weights: bigint[] = [];
       const labels: string[] = [];
       while (masks.length < m) {
         const size = 2 + Math.floor(rand() * (n - 3)); // 2..n-2
@@ -293,7 +430,9 @@ describe('与暴力枚举对照（随机实例）', () => {
         if (seen.has(mask)) continue;
         seen.add(mask);
         masks.push(mask);
-        weights.push(1 + Math.floor(rand() * 9));
+        // 约四分之一实例使用超 2^53 的大整数权重，检验任意精度累加
+        const small = BigInt(1 + Math.floor(rand() * 9));
+        weights.push(rand() < 0.25 ? small * 10n ** 24n + small : small);
         labels.push(
           Array.from({ length: n }, (_, i) => i)
             .filter((i) => ((mask >> i) & 1) === 1)

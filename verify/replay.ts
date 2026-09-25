@@ -1,4 +1,4 @@
-// 验收样例重放：互补规范化、最大兼容集、候选三分类。
+// 验收样例重放：互补规范化、最大兼容集、候选三分类、大整数权重。
 // 每个场景打印 PASS/FAIL 与关键证据，任一失败则以非零码退出。
 import { analyze, parseSpecies, parseSplits } from '../src/lib/splits';
 
@@ -56,7 +56,7 @@ header('场景二：最大兼容集（逐条高权贪心会堵死更优组合）
   );
   check(
     '总权重最大',
-    an.score.weight === 12,
+    an.score.weight === 12n,
     `最优总权重 ${an.score.weight}（贪心仅 11：先取 #1 后只剩 #4 可兼容）`,
   );
   check('数量次优', an.score.count === 3, `分裂数量 ${an.score.count}`);
@@ -90,7 +90,7 @@ header('场景三：候选三分类（必选 / 可选 / 从不选）与字典序
   );
   check(
     '最优得分',
-    an.score.weight === 15 && an.score.count === 2,
+    an.score.weight === 15n && an.score.count === 2,
     `总权重 ${an.score.weight}、数量 ${an.score.count}（同优解 {r,o1} 与 {r,o2}）`,
   );
   check(
@@ -104,6 +104,102 @@ header('场景三：候选三分类（必选 / 可选 / 从不选）与字典序
     chosenLabels.join('|') === 'C D|C D E F',
     `展示解规范序列 = [${chosenLabels.map((s) => `"${s}"`).join(', ')}]，` +
       `小于另一同优解 ["C D E F", "C E"]`,
+  );
+}
+
+// ---------------------------------------------------------------- 场景四
+header('场景四：大整数权重（任意位数正整数，汇总无损）');
+{
+  // 三条 4 物种分裂两两冲突；首条权重超过 64 位与 2^53，且 ≡ 1 (mod 1_000_000_007)，
+  // 任何取模 / 双精度截断都会让它输给 900000000，正确结论必须无损保留它。
+  const BIG = '1000000007000000001';
+  const sp = parseSpecies('A B C D');
+  const r = parseSplits(
+    [`${BIG}: A B | C D`, '900000000: A C | B D', '1: A D | B C'].join('\n'),
+    sp.names,
+  );
+  const c1 = r.candidates[0];
+  check(
+    '候选表保留原始十进制文本',
+    r.candidates.length === 3 && c1 !== undefined && c1.weightText === BIG,
+    `#1 权重文本 = ${c1?.weightText ?? '∅'}（${BIG.length} 位，逐字符一致）`,
+  );
+  check(
+    '权重精确解析',
+    c1 !== undefined && c1.weight === BigInt(BIG) && c1.weight.toString() === BIG,
+    `#1 权重 = ${c1?.weight?.toString() ?? '∅'}（无取模、无截断）`,
+  );
+  const an = analyze(
+    r.candidates.map((c) => c.mask),
+    r.candidates.map((c) => c.weight),
+    r.candidates.map((c) => c.label),
+    sp.names.length,
+  );
+  check(
+    '最大总权重无损',
+    an.score.weight === BigInt(BIG) && an.score.weight.toString() === BIG && an.score.count === 1,
+    `最大总权重 = ${an.score.weight}、数量 ${an.score.count}（须完整显示 ${BIG}）`,
+  );
+  check(
+    '展示解为首条分裂',
+    an.chosen.length === 1 && an.chosen[0] === 0 && r.candidates[0].display === 'C D | A B',
+    `展示解 = { ${an.chosen.map((i) => r.candidates[i].display).join(' ; ')} }`,
+  );
+  check(
+    '三分类：首条必选、其余从不选',
+    an.verdicts.join(',') === 'required,never,never',
+    `#1=${an.verdicts[0]} #2=${an.verdicts[1]} #3=${an.verdicts[2]}`,
+  );
+  const offDiag = [an.compat[0][1], an.compat[0][2], an.compat[1][2]];
+  const diag = [an.compat[0][0], an.compat[1][1], an.compat[2][2]];
+  check(
+    '兼容矩阵三者互斥',
+    offDiag.every((v) => !v) && diag.every((v) => v),
+    `非对角 = [${offDiag.join(', ')}]，对角 = [${diag.join(', ')}]`,
+  );
+
+  // 相互复算：仅凭候选表权重文本 + 兼容矩阵暴力枚举全部同优解，
+  // 重算汇总得分、展示解与三分类，须与报告值一致。
+  const m = r.candidates.length;
+  const optimal: number[][] = [];
+  let bestW = -1n;
+  let bestC = -1;
+  for (let s = 0; s < 1 << m; s++) {
+    const mem: number[] = [];
+    for (let i = 0; i < m; i++) if ((s & (1 << i)) !== 0) mem.push(i);
+    let ok = true;
+    for (let a = 0; a < mem.length && ok; a++) {
+      for (let b = a + 1; b < mem.length && ok; b++) {
+        if (!an.compat[mem[a]][mem[b]]) ok = false;
+      }
+    }
+    if (!ok) continue;
+    const w = mem.reduce((acc, i) => acc + BigInt(r.candidates[i].weightText), 0n);
+    if (w > bestW || (w === bestW && mem.length > bestC)) {
+      bestW = w;
+      bestC = mem.length;
+      optimal.length = 0;
+      optimal.push(mem);
+    } else if (w === bestW && mem.length === bestC) {
+      optimal.push(mem);
+    }
+  }
+  const reVerdicts = r.candidates.map((_, i) => {
+    const inAll = optimal.every((mem) => mem.includes(i));
+    const inSome = optimal.some((mem) => mem.includes(i));
+    if (inAll) return 'required';
+    if (!inSome) return 'never';
+    return 'optional';
+  });
+  check(
+    '相互复算一致（候选表 × 兼容矩阵 → 汇总 / 展示解 / 三分类）',
+    bestW === an.score.weight &&
+      bestC === an.score.count &&
+      optimal.length === 1 &&
+      optimal[0].length === 1 &&
+      optimal[0][0] === an.chosen[0] &&
+      reVerdicts.join(',') === an.verdicts.join(','),
+    `复算得分 (${bestW}, ${bestC})，同优解 ${optimal.length} 个，复算分类 = ${reVerdicts.join('/')}`,
   );
 }
 
